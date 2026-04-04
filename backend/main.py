@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from typing import List
+from sqlalchemy import func
+from datetime import datetime, timedelta, date
+from typing import List, Dict
 import logging
 from dotenv import load_dotenv
 
@@ -32,6 +33,60 @@ app.add_middleware(
 )
 
 
+def _get_occupied_dates(db: Session) -> Dict[date, int]:
+    """Return dict of date -> number of subtasks already scheduled on that date."""
+    rows = db.query(func.date(Subtask.scheduled_date), func.count(Subtask.id)).group_by(
+        func.date(Subtask.scheduled_date)
+    ).all()
+    return {datetime.strptime(r[0], "%Y-%m-%d").date(): r[1] for r in rows}
+
+
+def _distribute_subtasks(
+    llm_subtasks,
+    deadline: datetime,
+    occupied_dates: Dict[date, int],
+) -> List[datetime]:
+    """Assign each subtask to a unique date, spreading from deadline backwards."""
+    today = date.today()
+    deadline_date = deadline.date()
+    days_available = (deadline_date - today).days
+    if days_available < 1:
+        days_available = 1
+
+    # Sort subtasks by day_offset descending (earliest first)
+    sorted_subtasks = sorted(llm_subtasks, key=lambda s: s.day_offset, reverse=True)
+
+    scheduled_dates = []
+    for sub in sorted_subtasks:
+        # Start from the LLM-suggested day_offset
+        preferred_date = deadline_date - timedelta(days=sub.day_offset)
+        # Clamp to today
+        if preferred_date < today:
+            preferred_date = today
+        if preferred_date > deadline_date:
+            preferred_date = deadline_date
+
+        # Find nearest free date (prefer earlier dates)
+        current = preferred_date
+        attempts = 0
+        max_attempts = days_available + 5
+        while attempts < max_attempts:
+            existing_count = occupied_dates.get(current, 0)
+            if existing_count == 0 and current not in scheduled_dates:
+                break
+            current -= timedelta(days=1)
+            if current < today:
+                current = preferred_date + timedelta(days=1)
+                if current > deadline_date:
+                    current = deadline_date
+            attempts += 1
+
+        occupied_dates[current] = occupied_dates.get(current, 0) + 1
+        scheduled_dates.append(current)
+
+    return scheduled_dates
+
+
 @app.post("/api/assignments", response_model=AssignmentDetail)
 async def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db)):
     """Create assignment and generate subtasks via LLM."""
@@ -54,13 +109,15 @@ async def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db
             estimated_hours=assignment.estimated_hours,
         )
 
-        for sub in llm_subtasks:
-            scheduled_date = assignment.deadline - timedelta(days=sub.day_offset)
+        occupied_dates = _get_occupied_dates(db)
+        scheduled_dates = _distribute_subtasks(llm_subtasks, assignment.deadline, occupied_dates)
+
+        for sub, sched_date in zip(llm_subtasks, scheduled_dates):
             db_subtask = Subtask(
                 assignment_id=assignment.id,
                 title=sub.title,
                 description=sub.description,
-                scheduled_date=scheduled_date,
+                scheduled_date=datetime.combine(sched_date, datetime.min.time()),
                 estimated_hours=sub.estimated_hours,
             )
             db.add(db_subtask)
