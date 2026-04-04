@@ -1,0 +1,29 @@
+# Environment variables
+.env
+.env.secret
+.env.*.secret
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.db
+venv/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+npm-debug.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pid
