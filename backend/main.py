@@ -99,10 +99,35 @@ async def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db
     )
 
 
-@app.get("/api/assignments", response_model=List[AssignmentResponse])
+@app.get("/api/assignments", response_model=List[AssignmentDetail])
 def list_assignments(db: Session = Depends(get_db)):
-    """List all assignments."""
-    return db.query(Assignment).order_by(Assignment.deadline).all()
+    """List all assignments with subtasks."""
+    assignments = db.query(Assignment).order_by(Assignment.deadline).all()
+    result = []
+    for a in assignments:
+        subtasks = db.query(Subtask).filter(Subtask.assignment_id == a.id).all()
+        result.append(AssignmentDetail(
+            id=a.id,
+            title=a.title,
+            course_code=a.course_code,
+            deadline=a.deadline,
+            estimated_hours=a.estimated_hours,
+            created_at=a.created_at,
+            completed=a.completed,
+            subtasks=[
+                SubtaskResponse(
+                    id=s.id,
+                    assignment_id=s.assignment_id,
+                    title=s.title,
+                    description=s.description,
+                    scheduled_date=s.scheduled_date,
+                    estimated_hours=s.estimated_hours,
+                    completed=s.completed,
+                )
+                for s in subtasks
+            ],
+        ))
+    return result
 
 
 @app.get("/api/assignments/{assignment_id}", response_model=AssignmentDetail)

@@ -176,8 +176,9 @@ function App() {
 
       <div className="assignments-list">
         {assignments.map((a) => {
-          const completedCount = a.subtasks.filter((s) => s.completed).length;
-          const totalCount = a.subtasks.length;
+          const subtasks = a.subtasks || [];
+          const completedCount = subtasks.filter((s) => s.completed).length;
+          const totalCount = subtasks.length;
           const progress = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
 
           return (
