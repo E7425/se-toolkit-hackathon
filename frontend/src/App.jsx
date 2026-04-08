@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchAssignments, createAssignment, toggleSubtask, deleteAssignment } from './api';
+import CalendarView from './CalendarView';
 
 function App() {
   const [assignments, setAssignments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [view, setView] = useState('list'); // 'list' | 'calendar'
 
   // Form state
   const [form, setForm] = useState({
@@ -79,6 +81,11 @@ function App() {
 
   const formatDate = (dateStr) => {
     const d = new Date(dateStr);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  };
+
+  const formatDateTime = (dateStr) => {
+    const d = new Date(dateStr);
     return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   };
 
@@ -97,6 +104,14 @@ function App() {
       <header>
         <h1>📚 Study Timeline</h1>
         <p>Turn assignment deadlines into a clear, actionable study plan</p>
+        <div className="view-toggle">
+          <button className={`toggle-btn ${view === 'list' ? 'active' : ''}`} onClick={() => setView('list')}>
+            📋 Список
+          </button>
+          <button className={`toggle-btn ${view === 'calendar' ? 'active' : ''}`} onClick={() => setView('calendar')}>
+            📅 Календарь
+          </button>
+        </div>
       </header>
 
       {/* Form */}
@@ -163,6 +178,14 @@ function App() {
       {/* Error */}
       {error && <div className="error">⚠️ {error}</div>}
 
+      {/* Calendar View */}
+      {view === 'calendar' && !loading && (
+        <CalendarView assignments={assignments} onToggleSubtask={handleToggleSubtask} />
+      )}
+
+      {/* List View */}
+      {view === 'list' && (
+        <>
       {/* Loading */}
       {loading && <div className="loading">Loading assignments...</div>}
 
@@ -238,7 +261,9 @@ function App() {
                         <div className="subtask-date">
                           {formatDate(sub.scheduled_date)}
                           <br />
-                          {sub.estimated_hours}h
+                          {sub.start_time && sub.end_time
+                            ? `${sub.start_time} – ${sub.end_time}`
+                            : `${sub.estimated_hours}h`}
                         </div>
                       </div>
                     ))}
@@ -248,6 +273,8 @@ function App() {
           );
         })}
       </div>
+      </>
+      )}
     </div>
   );
 }

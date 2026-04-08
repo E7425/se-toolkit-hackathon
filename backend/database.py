@@ -31,13 +31,36 @@ class Subtask(Base):
     title = Column(String, nullable=False)
     description = Column(Text, default="")
     scheduled_date = Column(DateTime, nullable=False)
+    start_time = Column(String(5), default="")
+    end_time = Column(String(5), default="")
     estimated_hours = Column(Float, nullable=False)
     completed = Column(Boolean, default=False)
 
     assignment = relationship("Assignment", back_populates="subtasks")
 
 
+# Create all tables first
 Base.metadata.create_all(bind=engine)
+
+
+# Auto-migrate: add time columns if they don't exist (after table creation)
+def _migrate_add_time_columns():
+    """Add start_time/end_time columns if they don't exist."""
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "subtasks" not in inspector.get_table_names():
+        return
+    columns = [col["name"] for col in inspector.get_columns("subtasks")]
+    with engine.connect() as conn:
+        if "start_time" not in columns:
+            conn.execute(text("ALTER TABLE subtasks ADD COLUMN start_time VARCHAR(5)"))
+            conn.commit()
+        if "end_time" not in columns:
+            conn.execute(text("ALTER TABLE subtasks ADD COLUMN end_time VARCHAR(5)"))
+            conn.commit()
+
+
+_migrate_add_time_columns()
 
 
 def get_db():

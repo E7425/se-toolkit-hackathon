@@ -41,38 +41,88 @@ def _get_occupied_dates(db: Session) -> Dict[date, int]:
     return {datetime.strptime(r[0], "%Y-%m-%d").date(): r[1] for r in rows}
 
 
+# Time slots for scheduling (start, end) as (hour, minute) tuples
+TIME_SLOTS = [
+    ((9, 0), (11, 0)),
+    ((11, 0), (13, 0)),
+    ((14, 0), (16, 0)),
+    ((16, 0), (18, 0)),
+    ((18, 0), (20, 0)),
+    ((20, 0), (22, 0)),
+]
+
+
+def _get_occupied_time_slots(db: Session) -> Dict[date, list]:
+    """Return dict of date -> list of occupied (start_time, end_time) strings."""
+    rows = db.query(Subtask.scheduled_date, Subtask.start_time, Subtask.end_time).filter(
+        Subtask.start_time != None, Subtask.start_time != "",
+        Subtask.end_time != None, Subtask.end_time != ""
+    ).all()
+    result = {}
+    for sched_dt, start_t, end_t in rows:
+        if sched_dt is None:
+            continue
+        d = sched_dt.date() if hasattr(sched_dt, 'date') else datetime.strptime(sched_dt, "%Y-%m-%d").date()
+        if d not in result:
+            result[d] = []
+        result[d].append((start_t, end_t))
+    return result
+
+
+def _fmt(hm):
+    """Format (hour, minute) tuple to 'HH:MM' string."""
+    return f"{hm[0]:02d}:{hm[1]:02d}"
+
+
+def _pick_time_slot(hours: float, occupied_slots: list) -> tuple:
+    """Pick a time slot that fits the estimated hours and isn't occupied. Returns (start_str, end_str)."""
+    needed_minutes = int(hours * 60)
+    for (sh, sm), (eh, em) in TIME_SLOTS:
+        slot_minutes = (eh * 60 + em) - (sh * 60 + sm)
+        if slot_minutes >= needed_minutes:
+            start_str = f"{sh:02d}:{sm:02d}"
+            is_occupied = any(s == start_str for s, e in occupied_slots)
+            if not is_occupied:
+                return start_str, f"{eh:02d}:{em:02d}"
+    # Fallback: find any free slot
+    for (sh, sm), (eh, em) in TIME_SLOTS:
+        start_str = f"{sh:02d}:{sm:02d}"
+        is_occupied = any(s == start_str for s, e in occupied_slots)
+        if not is_occupied:
+            return start_str, f"{eh:02d}:{em:02d}"
+    # All occupied — assign evening
+    return "20:00", "22:00"
+
+
 def _distribute_subtasks(
     llm_subtasks,
     deadline: datetime,
     occupied_dates: Dict[date, int],
-) -> List[datetime]:
-    """Assign each subtask to a unique date, spreading from deadline backwards."""
+    occupied_slots: Dict[date, list],
+) -> List[tuple]:
+    """Assign each subtask to a unique date and time slot. Returns list of (date, start_str, end_str)."""
     today = date.today()
     deadline_date = deadline.date()
     days_available = (deadline_date - today).days
     if days_available < 1:
         days_available = 1
 
-    # Sort subtasks by day_offset descending (earliest first)
     sorted_subtasks = sorted(llm_subtasks, key=lambda s: s.day_offset, reverse=True)
 
-    scheduled_dates = []
+    scheduled = []
     for sub in sorted_subtasks:
-        # Start from the LLM-suggested day_offset
         preferred_date = deadline_date - timedelta(days=sub.day_offset)
-        # Clamp to today
         if preferred_date < today:
             preferred_date = today
         if preferred_date > deadline_date:
             preferred_date = deadline_date
 
-        # Find nearest free date (prefer earlier dates)
         current = preferred_date
         attempts = 0
-        max_attempts = days_available + 5
+        max_attempts = days_available + 10
         while attempts < max_attempts:
             existing_count = occupied_dates.get(current, 0)
-            if existing_count == 0 and current not in scheduled_dates:
+            if existing_count == 0 and current not in [s[0] for s in scheduled]:
                 break
             current -= timedelta(days=1)
             if current < today:
@@ -82,9 +132,12 @@ def _distribute_subtasks(
             attempts += 1
 
         occupied_dates[current] = occupied_dates.get(current, 0) + 1
-        scheduled_dates.append(current)
+        day_slots = occupied_slots.get(current, [])
+        start_t, end_t = _pick_time_slot(sub.estimated_hours, day_slots)
+        occupied_slots.setdefault(current, []).append((start_t, end_t))
+        scheduled.append((current, start_t, end_t))
 
-    return scheduled_dates
+    return scheduled
 
 
 @app.post("/api/assignments", response_model=AssignmentDetail)
@@ -110,14 +163,17 @@ async def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db
         )
 
         occupied_dates = _get_occupied_dates(db)
-        scheduled_dates = _distribute_subtasks(llm_subtasks, assignment.deadline, occupied_dates)
+        occupied_slots = _get_occupied_time_slots(db)
+        scheduled = _distribute_subtasks(llm_subtasks, assignment.deadline, occupied_dates, occupied_slots)
 
-        for sub, sched_date in zip(llm_subtasks, scheduled_dates):
+        for sub, (sched_date, start_t, end_t) in zip(llm_subtasks, scheduled):
             db_subtask = Subtask(
                 assignment_id=assignment.id,
                 title=sub.title,
                 description=sub.description,
                 scheduled_date=datetime.combine(sched_date, datetime.min.time()),
+                start_time=start_t,
+                end_time=end_t,
                 estimated_hours=sub.estimated_hours,
             )
             db.add(db_subtask)
@@ -148,6 +204,8 @@ async def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db
                 title=s.title,
                 description=s.description,
                 scheduled_date=s.scheduled_date,
+                start_time=s.start_time,
+                end_time=s.end_time,
                 estimated_hours=s.estimated_hours,
                 completed=s.completed,
             )
@@ -178,6 +236,8 @@ def list_assignments(db: Session = Depends(get_db)):
                     title=s.title,
                     description=s.description,
                     scheduled_date=s.scheduled_date,
+                    start_time=s.start_time,
+                    end_time=s.end_time,
                     estimated_hours=s.estimated_hours,
                     completed=s.completed,
                 )
@@ -211,6 +271,8 @@ def get_assignment(assignment_id: int, db: Session = Depends(get_db)):
                 title=s.title,
                 description=s.description,
                 scheduled_date=s.scheduled_date,
+                start_time=s.start_time,
+                end_time=s.end_time,
                 estimated_hours=s.estimated_hours,
                 completed=s.completed,
             )
@@ -242,6 +304,8 @@ def update_subtask(subtask_id: int, data: SubtaskUpdate, db: Session = Depends(g
         title=subtask.title,
         description=subtask.description,
         scheduled_date=subtask.scheduled_date,
+        start_time=subtask.start_time,
+        end_time=subtask.end_time,
         estimated_hours=subtask.estimated_hours,
         completed=subtask.completed,
     )

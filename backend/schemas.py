@@ -29,6 +29,8 @@ class SubtaskResponse(BaseModel):
     title: str
     description: str
     scheduled_date: datetime
+    start_time: str = ""
+    end_time: str = ""
     estimated_hours: float
     completed: bool
 
