@@ -56,7 +56,7 @@ async def generate_subtasks(
     if days_until_deadline < 1:
         days_until_deadline = 1
 
-    prompt = f"""Break this university assignment into 4-6 logical subtasks with suggested daily completion windows.
+    prompt = f"""Break this university assignment into 4-6 logical subtasks in CHRONOLOGICAL ORDER.
 
 Assignment: "{title}"
 Course: {course_code}
@@ -64,22 +64,37 @@ Deadline: {deadline.strftime('%Y-%m-%d')}
 Total estimated hours: {estimated_hours}
 Days until deadline: {days_until_deadline}
 
-Requirements:
-- Create 4-6 subtasks that make sense for a university assignment (e.g., Research, Outline, Draft, Revise, Final Review)
-- Distribute the estimated hours across subtasks (total should equal {estimated_hours})
-- Spread work across available days, with lighter loads on earlier days and buffer before deadline
-- day_offset means days before deadline (0 = deadline day, 1 = day before, etc.)
-- Earlier subtasks should have higher day_offset values
+STEP ORDER (follow this structure):
+1. FIRST: Research & Planning — read materials, plan approach, gather resources
+2. SECOND: Implementation — write code / draft content / do the main work
+3. THIRD: Testing & Debugging — check correctness, fix issues
+4. FOURTH: Review & Polish — final review, formatting, submission prep
 
-Return ONLY valid JSON array, no markdown, no explanation. Format:
+IMPORTANT — distribute hours proportionally by task complexity:
+- Implementation should get the MOST hours (50-60% of total)
+- Research & Planning: 15-20%
+- Testing & Debugging: 15-20%
+- Review & Polish: 5-10%
+
+CRITICAL: The SUM of all subtask estimated_hours MUST EXACTLY equal {estimated_hours}.
+Do NOT exceed this total.
+
+day_offset RULES:
+- day_offset = number of days BEFORE the deadline
+- day_offset=0 means deadline day, day_offset=1 means 1 day before, etc.
+- The FIRST subtask (Research) gets the HIGHEST day_offset (furthest from deadline)
+- The LAST subtask (Review/Polish) gets the LOWEST day_offset (closest to deadline)
+- Subtasks must be in CHRONOLOGICAL ORDER: first subtask = start working, last = final check
+
+Example with deadline on May 15, 12 hours total, 10 days available:
 [
-  {{
-    "title": "Research & Gather Materials",
-    "description": "Collect sources, read relevant chapters, take notes",
-    "day_offset": {days_until_deadline},
-    "estimated_hours": 2.5
-  }}
-]"""
+  {{"title": "Research & Planning", "description": "Read materials, plan approach, gather resources", "day_offset": 10, "estimated_hours": 2.0}},
+  {{"title": "Implement Core Features", "description": "Write the main code/content", "day_offset": 7, "estimated_hours": 6.0}},
+  {{"title": "Test & Debug", "description": "Verify correctness, fix issues", "day_offset": 3, "estimated_hours": 2.5}},
+  {{"title": "Review & Final Polish", "description": "Final review, formatting, prepare submission", "day_offset": 1, "estimated_hours": 1.5}}
+]
+
+Return ONLY valid JSON array, no markdown, no explanation."""
 
     messages = [
         {
@@ -110,12 +125,57 @@ Return ONLY valid JSON array, no markdown, no explanation. Format:
 
             # Try to extract JSON from response (in case there's extra text)
             subtasks = _parse_json_response(content)
+            # Normalize hours so total equals estimated_hours
+            subtasks = _normalize_subtask_hours(subtasks, estimated_hours)
+            # Enforce logical chronological order by re-assigning day_offset
+            subtasks = _enforce_chronological_order(subtasks, days_until_deadline)
             return subtasks
 
     except Exception as e:
         logger.error(f"LLM API call failed: {e}")
         # Fallback: generate basic subtasks algorithmically
         return _generate_fallback_subtasks(title, estimated_hours, days_until_deadline)
+
+
+def _normalize_subtask_hours(subtasks: List[LLMSubtask], target_total: float) -> List[LLMSubtask]:
+    """Scale subtask hours proportionally so they sum exactly to target_total.
+    Preserves the LLM's relative distribution (harder tasks get more time)."""
+    n = len(subtasks)
+    if n == 0:
+        return subtasks
+    current_total = sum(s.estimated_hours for s in subtasks)
+    if current_total <= 0 or abs(current_total - target_total) < 0.01:
+        return subtasks
+    # Scale proportionally — preserve relative weights
+    for s in subtasks:
+        s.estimated_hours = round(s.estimated_hours * (target_total / current_total), 1)
+    # Fix rounding — adjust the largest subtask
+    current_total = sum(s.estimated_hours for s in subtasks)
+    diff = round(target_total - current_total, 1)
+    if abs(diff) > 0:
+        # Add to the subtask with the most hours
+        largest = max(subtasks, key=lambda s: s.estimated_hours)
+        largest.estimated_hours = round(largest.estimated_hours + diff, 1)
+    return subtasks
+
+
+def _enforce_chronological_order(subtasks: List[LLMSubtask], days_until_deadline: int) -> List[LLMSubtask]:
+    """Sort subtasks by their original day_offset (LLM's intended order)
+    and re-assign evenly-spaced day_offset values to guarantee chronological order."""
+    n = len(subtasks)
+    if n <= 1:
+        return subtasks
+    # Sort by original day_offset descending (highest = first to do)
+    subtasks.sort(key=lambda s: s.day_offset, reverse=True)
+    # Re-assign day_offset: evenly spaced from days_until_deadline down to 1
+    for i, s in enumerate(subtasks):
+        # First subtask gets furthest day, last gets closest to deadline
+        if n == 1:
+            s.day_offset = max(1, days_until_deadline)
+        else:
+            step = max(1, days_until_deadline // n)
+            s.day_offset = max(1, days_until_deadline - i * step)
+    return subtasks
 
 
 def _parse_json_response(content: str) -> List[LLMSubtask]:
@@ -148,25 +208,33 @@ def _generate_fallback_subtasks(
     estimated_hours: float,
     days_until_deadline: int,
 ) -> List[LLMSubtask]:
-    """Generate basic subtasks without LLM (fallback)."""
+    """Generate basic subtasks without LLM (fallback). Always in chronological order."""
     generic_subtasks = [
         {"title": "Research & Planning", "desc": "Gather materials and outline scope"},
-        {"title": "Draft - Main Content", "desc": "Write the main body of the assignment"},
-        {"title": "Review & Refine", "desc": "Check arguments, improve clarity"},
-        {"title": "Final Polish", "desc": "Proofread, format, submit"},
+        {"title": "Implement Main Content", "desc": "Write the main body of the assignment"},
+        {"title": "Test & Debug", "desc": "Verify correctness, fix issues"},
+        {"title": "Review & Final Polish", "desc": "Proofread, format, submit"},
     ]
 
     num_tasks = min(4, max(3, days_until_deadline))
-    hours_per_task = round(estimated_hours / num_tasks, 1)
+    base_hours = round(estimated_hours / num_tasks, 1)
 
     subtasks = []
     for i, task in enumerate(generic_subtasks[:num_tasks]):
-        day_offset = max(0, days_until_deadline - i - 1)
+        # Evenly space: first task furthest from deadline, last task closest
+        step = max(1, days_until_deadline // num_tasks)
+        day_offset = max(1, days_until_deadline - i * step)
         subtasks.append(LLMSubtask(
             title=task["title"],
             description=task["desc"],
             day_offset=day_offset,
-            estimated_hours=hours_per_task,
+            estimated_hours=base_hours,
         ))
+
+    # Fix rounding so total equals estimated_hours exactly
+    current_total = sum(s.estimated_hours for s in subtasks)
+    diff = round(estimated_hours - current_total, 1)
+    if subtasks and abs(diff) > 0:
+        subtasks[0].estimated_hours = round(subtasks[0].estimated_hours + diff, 1)
 
     return subtasks
